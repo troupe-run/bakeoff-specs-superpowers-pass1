@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -30,7 +31,9 @@ def _parser() -> argparse.ArgumentParser:
     cmds = config.add_subparsers(dest="cmd", required=True)
     for name, extra in (("show", ["path"]), ("set", ["path", "value"]), ("history", ["path?"])):
         p = cmds.add_parser(name)
-        p.add_argument("--theatre", default=".", help="theatre directory (default: current directory)")
+        p.add_argument(
+            "--theatre", default=None, help="theatre directory (default: $TROUPE_THEATRE, else current directory)"
+        )
         for arg in extra:
             if arg.endswith("?"):
                 p.add_argument(arg[:-1], nargs="?")
@@ -76,7 +79,7 @@ def run(argv: list[str]) -> int:
         except ValueError_ as exc:
             raise UsageError(f"invalid VALUE {args.value!r}: {exc}") from exc
 
-    theatre = Path(args.theatre)
+    theatre = Path(args.theatre if args.theatre is not None else os.environ.get("TROUPE_THEATRE") or ".")
     cfg = load(theatre)
     store = ConfigStore(cfg.config_path.parent)
     store.ensure_imported(flatten(cfg.root))

@@ -341,3 +341,23 @@ def test_cli_entrypoint(tmp_path):
         text=True,
     )
     assert r.returncode == 0 and r.stdout == "1\n"
+
+
+def test_theatre_from_env(theatre, tmp_path, monkeypatch, capsys):
+    from troupe.cli import main
+
+    theatre.write("troupe.yml", "a: 1\n")
+    other = tmp_path / "other"
+    (other / ".troupe").mkdir(parents=True)
+    (other / ".troupe" / "troupe.yml").write_text("a: 2\n")
+    monkeypatch.chdir(other)
+    monkeypatch.setenv("TROUPE_THEATRE", str(theatre.root))
+    capsys.readouterr()
+    assert main(["config", "show", "a"]) == 0
+    assert capsys.readouterr().out == "1\n"
+    assert theatre.show("a") == "1\n"
+    assert main(["config", "show", "a", "--theatre", str(other)]) == 0
+    assert capsys.readouterr().out == "2\n"
+    monkeypatch.setenv("TROUPE_THEATRE", "")
+    assert main(["config", "show", "a"]) == 0
+    assert capsys.readouterr().out == "2\n"
