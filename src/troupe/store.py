@@ -9,6 +9,8 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 from eventsourcing.application import AggregateNotFoundError, Application
 from eventsourcing.domain import Aggregate, event
 
+from .yamlcore import same
+
 STATE_FILE = "troupe-state.sqlite"
 
 
@@ -59,6 +61,9 @@ class ConfigStore(Application):
         except AggregateNotFoundError:
             return None
 
+    def exists(self) -> bool:
+        return self._get() is not None
+
     def ensure_imported(self, leaves: dict[str, Any]) -> None:
         if self._get() is not None:
             return
@@ -79,6 +84,26 @@ class ConfigStore(Application):
                 agg.leaf_set(path, old, new)
         self.save(agg)
 
+    def reconcile(self, leaves: dict[str, Any]) -> None:
+        """Record a `set`/`remove` for each leaf where `leaves` (the files) differ from the projection."""
+        agg = self._get()
+        assert agg is not None
+        self.record(diff(agg.leaves, leaves))
+
     def history(self) -> list[dict[str, Any]]:
         agg = self._get()
         return list(agg.log) if agg else []
+
+
+def diff(before: dict[str, Any], after: dict[str, Any]) -> list[tuple[str, str, Any, Any]]:
+    """The leaf changes from `before` to `after`: sets in `after`'s order, then removes."""
+    changes: list[tuple[str, str, Any, Any]] = []
+    for p, v in after.items():
+        if p not in before:
+            changes.append(("set", p, None, v))
+        elif not same(before[p], v):
+            changes.append(("set", p, before[p], v))
+    for p, v in before.items():
+        if p not in after:
+            changes.append(("remove", p, v, None))
+    return changes

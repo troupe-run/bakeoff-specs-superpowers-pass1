@@ -321,12 +321,11 @@ def test_history(theatre):
     assert theatre.history("m.y.0") == [h[1], h[4]]
 
 
-def test_import_is_not_reconciling(theatre):
+def test_import_happens_once(theatre):
     theatre.write("troupe.yml", "a: 1\n")
     theatre.show("a")
-    theatre.write("troupe.yml", "a: 2\n")
-    assert theatre.show("a") == "2\n"
-    assert len(theatre.history()) == 1
+    theatre.show("a")
+    assert [e["op"] for e in theatre.history()] == ["import"]
 
 
 def test_cli_entrypoint(tmp_path):
