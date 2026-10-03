@@ -1,4 +1,4 @@
-"""`troupe config show|set|history|watch`."""
+"""`troupe config get|show|set|history|watch`."""
 
 from __future__ import annotations
 
@@ -24,6 +24,7 @@ from .config import (
     lookup,
     split_path,
 )
+from .dump import dump, source_namer
 from .store import STATE_FILE, ConfigStore, diff
 from .writer import Writer
 from .yamlcore import ValueError_, format_scalar, parse_value, same
@@ -43,7 +44,14 @@ def _parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="group", required=True)
     config = sub.add_parser("config", help="show and change the theatre configuration")
     cmds = config.add_subparsers(dest="cmd", required=True)
-    for name, extra in (("show", ["path"]), ("set", ["path", "value"]), ("history", ["path?"]), ("watch", [])):
+    commands = (
+        ("get", ["path"]),
+        ("show", ["path?"]),
+        ("set", ["path", "value"]),
+        ("history", ["path?"]),
+        ("watch", []),
+    )
+    for name, extra in commands:
         p = cmds.add_parser(name)
         p.add_argument(
             "--theatre", default=None, help="theatre directory (default: $TROUPE_THEATRE, else current directory)"
@@ -53,6 +61,8 @@ def _parser() -> argparse.ArgumentParser:
                 p.add_argument(arg[:-1], nargs="?")
             else:
                 p.add_argument(arg)
+        if name == "show":
+            p.add_argument("--sources", action="store_true", help="say which file each value comes from")
     return parser
 
 
@@ -117,10 +127,16 @@ def run(argv: list[str]) -> int:
             if args.cmd == "set":
                 return _set(theatre, cfg, store, segs, args.path, value)
 
-    if args.cmd == "show":
-        item = lookup(cfg.root, segs, args.path)
-        if item.kind not in ("scalar", "text"):
-            raise PathNotFound(f"{args.path}: is a {'mapping' if item.kind == 'map' else 'list'}, not a scalar")
+    if args.cmd in ("get", "show"):
+        item = lookup(cfg.root, segs, args.path) if segs is not None else cfg.root
+        if args.cmd == "show" and (args.sources or item.kind in ("map", "seq")):
+            _out(dump(item, source_namer(theatre) if args.sources else None))
+            return 0
+        if item.kind in ("map", "seq"):
+            raise PathNotFound(
+                f"{args.path}: is a {'mapping' if item.kind == 'map' else 'list'}, not a scalar;"
+                f" use `troupe config show {args.path}` to print it"
+            )
         text = format_scalar(item.value)
         _out(text if text.endswith("\n") else text + "\n")
         return 0

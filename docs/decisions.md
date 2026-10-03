@@ -6,7 +6,7 @@ corrupt user data or to contradict the contract.
 1. **Integration: keep the work on `main`; no push, no pull request.** The delivery rule says the work is
    done when committed on `main` and forbids pushing and opening PRs. The work was committed directly to
    `main`, so there is nothing to merge and nothing to clean up.
-2. **`show` reads the files, not the event store.** Files are the source of truth that people edit by
+2. **`get`/`show` read the files, not the event store.** Files are the source of truth that people edit by
    hand. (Since step 2, `show` reconciles first, so the two agree anyway.)
 3. **Every write is verified before any file is touched.** The edited texts are re-parsed and the value at
    `PATH` is compared with `VALUE`; on mismatch the command exits 3 and changes nothing.
@@ -37,3 +37,15 @@ corrupt user data or to contradict the contract.
 14. **`history` does not need loadable files once something has been recorded**; it only loads them to
     perform the first import.
 15. **Reconcile emits `set`s in document order, then `remove`s**, the same order as `set`'s own events.
+16. **`show` writes YAML that reads back as the same configuration.** Keys and strings are quoted only when
+    plain style would change their meaning (minimal style: plain, then single, then double quotes); comments
+    and the files' own quoting are not carried over. Empty collections are written `{}` / `[]`, and a list
+    item that is a collection is written compactly (`- k: v`, `- - x`).
+17. **A multi-line string, or a text include, is a literal block only if a literal block can hold it
+    exactly**; otherwise (carriage returns, a first line starting with a space, a value of only line
+    breaks, ...) it is written double-quoted, escapes and all.
+18. **With `--sources`, a literal block's comment goes on its header line** (`key: | # from p.md`): a
+    comment on a content line would become part of the value.
+19. **`show PATH --sources` on a scalar prints it as YAML (quoted if needed) with the comment**, rather than
+    the raw `get` form, since the contract describes `--sources` output as YAML.
+20. **Source files outside the theatre directory are named with `..` segments**, still relative to it.

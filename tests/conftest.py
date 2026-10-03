@@ -31,8 +31,8 @@ class Theatre:
             assert err
         return code, out, err
 
-    def show(self, path: str) -> str:
-        code, out, err = self.run("show", path)
+    def get(self, path: str) -> str:
+        code, out, err = self.run("get", path)
         assert code == 0, err
         return out
 

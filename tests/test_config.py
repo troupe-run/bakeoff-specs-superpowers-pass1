@@ -15,39 +15,39 @@ def test_show_scalars(theatre):
         "troupe.yml",
         "s: abc\nf: 0.2\nb: true\nn: null\ni: 0x1F\nq: \"0.2\"\nl:\n  - x\n  - y\ne: 1e3\nm: {a: 1}\nt: ~\n",
     )
-    assert theatre.show("s") == "abc\n"
-    assert theatre.show("f") == "0.2\n"
-    assert theatre.show("b") == "true\n"
-    assert theatre.show("n") == "null\n"
-    assert theatre.show("t") == "null\n"
-    assert theatre.show("i") == "31\n"
-    assert theatre.show("q") == "0.2\n"
-    assert theatre.show("l.1") == "y\n"
-    assert theatre.show("e") == "1000.0\n"
-    assert theatre.show("m.a") == "1\n"
-    assert theatre.run("show", "l")[0] == 5
-    assert theatre.run("show", "m")[0] == 5
-    assert theatre.run("show", "nope")[0] == 5
-    assert theatre.run("show", "l.5")[0] == 5
-    assert theatre.run("show", "s.x")[0] == 5
+    assert theatre.get("s") == "abc\n"
+    assert theatre.get("f") == "0.2\n"
+    assert theatre.get("b") == "true\n"
+    assert theatre.get("n") == "null\n"
+    assert theatre.get("t") == "null\n"
+    assert theatre.get("i") == "31\n"
+    assert theatre.get("q") == "0.2\n"
+    assert theatre.get("l.1") == "y\n"
+    assert theatre.get("e") == "1000.0\n"
+    assert theatre.get("m.a") == "1\n"
+    assert theatre.run("get", "l")[0] == 5
+    assert theatre.run("get", "m")[0] == 5
+    assert theatre.run("get", "nope")[0] == 5
+    assert theatre.run("get", "l.5")[0] == 5
+    assert theatre.run("get", "s.x")[0] == 5
 
 
 def test_show_block_string(theatre):
     theatre.write("troupe.yml", "a: |\n  one\n  two\nb: |-\n  x\n")
-    assert theatre.show("a") == "one\ntwo\n"
-    assert theatre.show("b") == "x\n"
+    assert theatre.get("a") == "one\ntwo\n"
+    assert theatre.get("b") == "x\n"
 
 
 def test_missing_or_both_config(theatre):
-    assert theatre.run("show", "a")[0] == 4
+    assert theatre.run("get", "a")[0] == 4
     theatre.write("troupe.yml", "a: 1\n")
     theatre.write("troupe.yaml", "a: 1\n")
-    assert theatre.run("show", "a")[0] == 4
+    assert theatre.run("get", "a")[0] == 4
 
 
 def test_yaml_config_name(theatre):
     theatre.write("troupe.yaml", "a: 1\n")
-    assert theatre.show("a") == "1\n"
+    assert theatre.get("a") == "1\n"
 
 
 def test_includes(theatre):
@@ -55,23 +55,23 @@ def test_includes(theatre):
     theatre.write("agents/coder.yaml", "model: x\nprompt: file:../p/c.txt\n")
     theatre.write("p/sys.md", "hello\r\nworld")
     theatre.write("p/c.txt", "code\n")
-    assert theatre.show("agents.coder.model") == "x\n"
-    assert theatre.show("agents.coder.prompt") == "code\n"
-    assert theatre.show("prompt") == "hello\r\nworld\n"
-    assert theatre.run("show", "agents.coder")[0] == 5
+    assert theatre.get("agents.coder.model") == "x\n"
+    assert theatre.get("agents.coder.prompt") == "code\n"
+    assert theatre.get("prompt") == "hello\r\nworld\n"
+    assert theatre.run("get", "agents.coder")[0] == 5
 
 
 def test_include_missing_and_cycle(theatre):
     theatre.write("troupe.yml", "a: file:x.yml\n")
-    assert theatre.run("show", "a")[0] == 4
+    assert theatre.run("get", "a")[0] == 4
     theatre.write("x.yml", "b: file:troupe.yml\n")
-    assert theatre.run("show", "a")[0] == 4
+    assert theatre.run("get", "a")[0] == 4
     assert not (theatre.dir / "troupe-state.sqlite").exists()
 
 
 def test_invalid_yaml(theatre):
     theatre.write("troupe.yml", "a: [1\n")
-    assert theatre.run("show", "a")[0] == 4
+    assert theatre.run("get", "a")[0] == 4
 
 
 # ---------------------------------------------------------------- set: scalars
@@ -102,7 +102,7 @@ def test_quoting_kept_or_fallback(theatre):
     assert "c: 'a: b'\n" in theatre.read()
     theatre.set("a", "7")
     assert "a: 7\n" in theatre.read()
-    assert theatre.show("a") == "7\n"
+    assert theatre.get("a") == "7\n"
 
 
 def test_double_quoted_escapes_only_required(theatre):
@@ -146,7 +146,7 @@ def test_folded_rewrap(theatre):
         "  Second paragraph stays.\n"
         "next: 1\n"
     )
-    assert theatre.show("notes") == "The quick brown fox jumps over the very lazy dog.\nSecond paragraph stays.\n"
+    assert theatre.get("notes") == "The quick brown fox jumps over the very lazy dog.\nSecond paragraph stays.\n"
 
 
 def test_folded_keeps_unchanged_paragraph_bytes(theatre):
@@ -323,8 +323,8 @@ def test_history(theatre):
 
 def test_import_happens_once(theatre):
     theatre.write("troupe.yml", "a: 1\n")
-    theatre.show("a")
-    theatre.show("a")
+    theatre.get("a")
+    theatre.get("a")
     assert [e["op"] for e in theatre.history()] == ["import"]
 
 
@@ -354,7 +354,7 @@ def test_theatre_from_env(theatre, tmp_path, monkeypatch, capsys):
     capsys.readouterr()
     assert main(["config", "show", "a"]) == 0
     assert capsys.readouterr().out == "1\n"
-    assert theatre.show("a") == "1\n"
+    assert theatre.get("a") == "1\n"
     assert main(["config", "show", "a", "--theatre", str(other)]) == 0
     assert capsys.readouterr().out == "2\n"
     monkeypatch.setenv("TROUPE_THEATRE", "")
