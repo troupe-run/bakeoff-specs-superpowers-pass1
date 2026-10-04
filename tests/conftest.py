@@ -36,8 +36,8 @@ class Theatre:
         assert code == 0, err
         return out
 
-    def set(self, path: str, value: str, expect: int = 0) -> None:
-        code, _, err = self.run("set", path, value)
+    def set(self, path: str, value: str, *extra: str, expect: int = 0) -> None:
+        code, _, err = self.run("set", path, value, *extra)
         assert code == expect, err
 
     def history(self, path: str | None = None) -> list[dict]:

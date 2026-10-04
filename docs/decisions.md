@@ -49,3 +49,16 @@ corrupt user data or to contradict the contract.
 19. **`show PATH --sources` on a scalar prints it as YAML (quoted if needed) with the comment**, rather than
     the raw `get` form, since the contract describes `--sources` output as YAML.
 20. **Source files outside the theatre directory are named with `..` segments**, still relative to it.
+21. **`TROUPE_ACTOR` is checked by every command, not just `set`**; an invalid value exits 2 before
+    anything is read or recorded. An empty value is invalid rather than "unset": an agent with a
+    misconfigured variable must not be recorded as the logged-in human. The id is everything after the
+    first `:` and must be non-empty. If no login name can be found, the default actor's id is `null`.
+22. **A command's file reconcile is its own change, separate from the `set` that follows it**: the hand
+    edits have actor `unknown`, `via: "file"`, no reason and their own `change` id; `--reason` and the
+    CLI actor apply only to the `set`'s own events. `change` ids are random UUIDs; all events of one
+    change share one `at`.
+23. **Events recorded before lineage existed are upcast, not guessed at.** They get actor `unknown`, `at`
+    from the stored event's own timestamp, and `reason: null`. A legacy import keeps `via: "import"` and
+    gets `change: "import"` (there is only ever one import, recorded as a unit). A legacy `set`/`remove`
+    may have come from the CLI or a hand edit, which cannot be told apart, so its `via` and `change`
+    are `null`.

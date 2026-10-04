@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import getpass
 import json
 import os
 import signal
@@ -25,7 +26,7 @@ from .config import (
     split_path,
 )
 from .dump import dump, source_namer
-from .store import STATE_FILE, ConfigStore, diff
+from .store import STATE_FILE, ConfigStore, diff, lineage
 from .writer import Writer
 from .yamlcore import ValueError_, format_scalar, parse_value, same
 
@@ -63,6 +64,8 @@ def _parser() -> argparse.ArgumentParser:
                 p.add_argument(arg)
         if name == "show":
             p.add_argument("--sources", action="store_true", help="say which file each value comes from")
+        if name == "set":
+            p.add_argument("--reason", default=None, help="why the change is made (recorded in history)")
     return parser
 
 
@@ -88,8 +91,24 @@ def main(argv: list[str] | None = None) -> int:
         return 5
 
 
+def actor_from_env() -> dict[str, str | None]:
+    """The actor behind a CLI command: `TROUPE_ACTOR` (`human:<id>` / `agent:<id>`), else the login name."""
+    spec = os.environ.get("TROUPE_ACTOR")
+    if spec is None:
+        try:
+            login: str | None = getpass.getuser() or None
+        except (OSError, KeyError):
+            login = None  # no login name to be found: say so rather than guess
+        return {"kind": "human", "id": login}
+    kind, sep, ident = spec.partition(":")
+    if not sep or kind not in ("human", "agent") or not ident:
+        raise UsageError(f"TROUPE_ACTOR must be human:<id> or agent:<id>, not {spec!r}")
+    return {"kind": kind, "id": ident}
+
+
 def run(argv: list[str]) -> int:
     args = _parser().parse_args(argv)
+    actor = actor_from_env()
     segs: list[str] | None = None
     if getattr(args, "path", None) is not None:
         try:
@@ -125,7 +144,8 @@ def run(argv: list[str]) -> int:
             store = ConfigStore(troupe_dir)
             _reconcile(store, cfg)
             if args.cmd == "set":
-                return _set(theatre, cfg, store, segs, args.path, value)
+                how = lineage("cli", actor, args.reason)
+                return _set(theatre, cfg, store, segs, args.path, value, how)
 
     if args.cmd in ("get", "show"):
         item = lookup(cfg.root, segs, args.path) if segs is not None else cfg.root
@@ -172,7 +192,7 @@ def _reconcile(store: ConfigStore, cfg: Config) -> None:
         store.ensure_imported(leaves)
 
 
-def _set(theatre: Path, cfg, store: ConfigStore, segs: list[str], path: str, value) -> int:
+def _set(theatre: Path, cfg, store: ConfigStore, segs: list[str], path: str, value, how: dict) -> int:
     writer = Writer()
     writer.set_path(cfg.root, segs, value, path)
     results = {p: t for p, t in writer.results().items() if p not in writer.docs or t != writer.docs[p].text}
@@ -190,7 +210,7 @@ def _set(theatre: Path, cfg, store: ConfigStore, segs: list[str], path: str, val
     for p, text in results.items():
         p.write_bytes(text.encode("utf-8"))
 
-    store.record(diff(flatten(cfg.root), flatten(new_cfg.root)))
+    store.record(diff(flatten(cfg.root), flatten(new_cfg.root)), how)
     return 0
 
 

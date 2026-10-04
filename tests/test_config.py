@@ -299,9 +299,17 @@ def test_noop_set(theatre):
 # ---------------------------------------------------------------- history
 
 
+LINEAGE = ("actor", "via", "at", "reason", "change")
+
+
 def test_history(theatre):
     theatre.write("troupe.yml", "a: 1\nm:\n  x: 1\n  y: [p, q]\nt: file:t.txt\n")
     theatre.write("t.txt", "hi\n")
+    full = theatre.history()
+    assert all(set(LINEAGE) <= e.keys() for e in full)
+    theatre.history = lambda path=None: [  # lineage is covered by test_lineage.py
+        {k: v for k, v in e.items() if k not in LINEAGE} for e in type(theatre).history(theatre, path)
+    ]
     assert theatre.history() == [
         {"seq": 1, "op": "import", "path": "a", "old": None, "new": 1},
         {"seq": 2, "op": "import", "path": "m.x", "old": None, "new": 1},
