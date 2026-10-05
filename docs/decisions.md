@@ -78,3 +78,7 @@ corrupt user data or to contradict the contract.
     that anything but two mappings is replaced; with no overrides it is the included value unchanged.
 28. **Removing a key from a merged mapping (by setting the mapping) removes it everywhere it is set**:
     from the include and from the overrides, so the merged value is what was asked for.
+29. **`--in-include` only decides where new keys go.** A new key goes into the file the deepest existing
+    ancestor comes from; under a merged mapping, that is the included file (never the overrides, even if
+    they already hold part of the path). Existing values still change where they are set, and without
+    any include the flag changes nothing.

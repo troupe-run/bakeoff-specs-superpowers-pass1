@@ -135,3 +135,31 @@ def test_replacing_a_merged_section_writes_each_key_where_it_lives(theatre):
     assert theatre.read("c.yml") == "params:\n  a: 1\n  b: 2\n"
     assert theatre.read() == "coder:\n  $ref: file:c.yml\n  params:\n    a: 11\n    d: 4\n"
     theatre.set("coder", "{params: {a: 1}}", expect=3)
+
+
+# ---------------------------------------------------------------- --in-include
+
+
+def test_in_include_writes_new_key_into_included_file(theatre):
+    theatre.write("troupe.yml", "agents:\n  coder: file:agents/coder.yaml  # c\n")
+    theatre.write("agents/coder.yaml", "model: x\nparams:\n  a: 1\n")
+    theatre.set("--in-include", "agents.coder.temperature", "0.3")
+    theatre.set("agents.coder.params.b", "2", "--in-include")
+    assert theatre.read() == "agents:\n  coder: file:agents/coder.yaml  # c\n"
+    assert theatre.read("agents/coder.yaml") == "model: x\nparams:\n  a: 1\n  b: 2\ntemperature: 0.3\n"
+
+
+def test_in_include_through_mapping_form(theatre):
+    theatre.write("troupe.yml", "coder:\n  $ref: file:c.yml\n  model: y\n  params:\n    a: 10\n")
+    theatre.write("c.yml", "model: x\nparams:\n  a: 1\n")
+    theatre.set("--in-include", "coder.t", "1")
+    theatre.set("--in-include", "coder.params.b", "2")
+    theatre.set("--in-include", "coder.model", "z")  # existing: still changes where it is set
+    assert theatre.read() == "coder:\n  $ref: file:c.yml\n  model: z\n  params:\n    a: 10\n"
+    assert theatre.read("c.yml") == "model: x\nparams:\n  a: 1\n  b: 2\nt: 1\n"
+
+
+def test_in_include_without_include_is_ordinary_set(theatre):
+    theatre.write("troupe.yml", "a: 1\n")
+    theatre.set("--in-include", "b", "2")
+    assert theatre.read() == "a: 1\nb: 2\n"

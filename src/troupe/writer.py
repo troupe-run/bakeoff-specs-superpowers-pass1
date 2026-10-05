@@ -32,7 +32,8 @@ _COMMENT_GAP = re.compile(r"[ \t]+(?=#)")
 
 
 class Writer:
-    def __init__(self) -> None:
+    def __init__(self, in_include: bool = False) -> None:
+        self.in_include = in_include  # new keys go into the included file, not into overrides
         self.docs: dict[Path, Doc] = {}
         self.raw: dict[Path, str] = {}  # whole-file writes (text includes)
 
@@ -233,7 +234,12 @@ class Writer:
     # ------------------------------------------------------------------ adding entries
 
     def add_entries(self, item: Item, entries: list[tuple[str, Val]]) -> None:
-        site = override_site(item)
+        if self.in_include:
+            while item.parts is not None and item.parts[0].kind == "map":
+                item = item.parts[0]  # the included part of a merged mapping
+            site = None
+        else:
+            site = override_site(item)
         if site is not None:
             item, keys = site
             for k in reversed(keys):

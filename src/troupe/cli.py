@@ -66,6 +66,11 @@ def _parser() -> argparse.ArgumentParser:
             p.add_argument("--sources", action="store_true", help="say which file each value comes from")
         if name == "set":
             p.add_argument("--reason", default=None, help="why the change is made (recorded in history)")
+            p.add_argument(
+                "--in-include",
+                action="store_true",
+                help="write a new key into the included file instead of as an override in the including file",
+            )
     return parser
 
 
@@ -145,7 +150,7 @@ def run(argv: list[str]) -> int:
             _reconcile(store, cfg)
             if args.cmd == "set":
                 how = lineage("cli", actor, args.reason)
-                return _set(theatre, cfg, store, segs, args.path, value, how)
+                return _set(theatre, cfg, store, segs, args.path, value, how, args.in_include)
 
     if args.cmd in ("get", "show"):
         item = lookup(cfg.root, segs, args.path) if segs is not None else cfg.root
@@ -192,8 +197,10 @@ def _reconcile(store: ConfigStore, cfg: Config) -> None:
         store.ensure_imported(leaves)
 
 
-def _set(theatre: Path, cfg, store: ConfigStore, segs: list[str], path: str, value, how: dict) -> int:
-    writer = Writer()
+def _set(
+    theatre: Path, cfg, store: ConfigStore, segs: list[str], path: str, value, how: dict, in_include: bool = False
+) -> int:
+    writer = Writer(in_include)
     writer.set_path(cfg.root, segs, value, path)
     results = {p: t for p, t in writer.results().items() if p not in writer.docs or t != writer.docs[p].text}
     if not results:
