@@ -128,6 +128,10 @@ class Item:
     node: the YAML node in `doc` (for `text`, the `file:` string node).
     include: the include target when this value came from an include.
     parent/key: position in the containing collection (None for a document root).
+    ref: for the root of a YAML include, the including file and the `file:` string (scalar form) or
+        `$ref` mapping (mapping form) that includes it.
+    parts: for a mapping merged from an include and its overrides, the merged mappings (included part
+        first); `doc`/`node` are then the overrides' mapping, where new keys go.
     """
 
     kind: str
@@ -139,6 +143,8 @@ class Item:
     key: Any = None  # str for mapping entries, int for sequence items
     key_node: yaml.Node | None = None
     flow: bool = False  # inside a flow collection
+    ref: "tuple[Doc, yaml.Node] | None" = None
+    parts: "list[Item] | None" = None
 
     @property
     def yaml_include(self) -> bool:
@@ -187,14 +193,33 @@ def load(theatre: Path, overrides: dict[Path, str] | None = None) -> Config:
         if node is None:
             return Item("scalar", doc, None, None)
         if isinstance(node, yaml.MappingNode):
+            ref = None
             item = Item("map", doc, node, {}, flow=flow)
             for k, v in node.value:
                 if not isinstance(k, yaml.ScalarNode):
                     raise ConfigError(f"{doc.path}: complex mapping keys are not supported")
+                if k.value == "$ref":
+                    ref = v
+                    continue
                 child = build(doc, v, stack, bool(node.flow_style))
                 child.parent, child.key, child.key_node = item, k.value, k
                 item.value[k.value] = child
-            return item
+            if ref is None:
+                return item
+            # Mapping form: the included content, deep-merged with the other keys as overrides.
+            value = scalar_value(ref) if isinstance(ref, yaml.ScalarNode) else None
+            if not (isinstance(value, str) and value.startswith("file:")):
+                raise ConfigError(f"{doc.path}: $ref must be a file: include")
+            included = include(doc, ref, value, stack, flow)
+            if included.kind == "text":
+                if item.value:
+                    raise ConfigError(f"{doc.path}: overrides apply only to YAML includes, not {included.include}")
+                return included
+            if included.kind != "map" and not item.value:
+                return included
+            merged = merge(included, item)
+            merged.include = included.include
+            return merged
         if isinstance(node, yaml.SequenceNode):
             item = Item("seq", doc, node, [], flow=flow)
             for i, v in enumerate(node.value):
@@ -204,23 +229,50 @@ def load(theatre: Path, overrides: dict[Path, str] | None = None) -> Config:
             return item
         value = scalar_value(node)
         if isinstance(value, str) and value.startswith("file:"):
-            target = (doc.path.parent / value[5:]).resolve()
-            if target in stack:
-                raise ConfigError(f"{doc.path}: include cycle through {target}")
-            if not target.is_file():
-                raise ConfigError(f"{doc.path}: include target {target} not found")
-            if target.suffix in (".yml", ".yaml"):
-                tdoc = get_doc(target)
-                item = build(tdoc, tdoc.root, stack + (target,), False)
-                item.include = target
-                item.flow = flow
-                return item
-            return Item("text", doc, node, text_of(target), include=target, flow=flow)
+            item = include(doc, node, value, stack, flow)
+            if item.kind != "text" and item.ref is None:  # a whole-file include keeps the innermost
+                item.ref = (doc, node)
+            return item
         return Item("scalar", doc, node, value, flow=flow)
+
+    def include(doc: Doc, node: yaml.Node, value: str, stack: tuple[Path, ...], flow: bool) -> Item:
+        target = (doc.path.parent / value[5:]).resolve()
+        if target in stack:
+            raise ConfigError(f"{doc.path}: include cycle through {target}")
+        if not target.is_file():
+            raise ConfigError(f"{doc.path}: include target {target} not found")
+        if target.suffix in (".yml", ".yaml"):
+            tdoc = get_doc(target)
+            item = build(tdoc, tdoc.root, stack + (target,), False)
+            item.include = target
+            item.flow = flow
+            return item
+        return Item("text", doc, node, text_of(target), include=target, flow=flow)
 
     root_doc = get_doc(path)
     root = build(root_doc, root_doc.root, (path,), False)
     return Config(path, root, docs)
+
+
+def merge(base: Item, over: Item) -> Item:
+    """`base` deep-merged with `over`: mappings merge recursively, anything else in `over` replaces.
+
+    The result takes `over`'s position (parent, key).
+    """
+    if base.kind != "map" or over.kind != "map":
+        return over
+    item = Item("map", over.doc, over.node, {}, flow=over.flow, parts=[base, over])
+    item.parent, item.key, item.key_node = over.parent, over.key, over.key_node
+    for k, child in base.value.items():
+        if k in over.value:
+            child = merge(child, over.value[k])
+        child.parent = item
+        item.value[k] = child
+    for k, child in over.value.items():
+        if k not in base.value:
+            child.parent = item
+            item.value[k] = child
+    return item
 
 
 def flatten(item: Item, prefix: str = "") -> dict[str, Any]:

@@ -265,8 +265,7 @@ def test_include_refused(theatre):
     theatre.write("coder.yaml", "model: x\n")
     theatre.set("agents.coder", "{model: y}", expect=3)
     theatre.set("agents.coder.model", "y")
-    theatre.set("agents.coder.temp", "0.5")
-    assert theatre.read("coder.yaml") == "model: y\ntemp: 0.5\n"
+    assert theatre.read("coder.yaml") == "model: y\n"
     assert theatre.read() == "agents:\n  coder: file:coder.yaml\n"
 
 

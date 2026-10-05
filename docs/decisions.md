@@ -13,7 +13,8 @@ corrupt user data or to contradict the contract.
 4. **A mapping/list set onto a node of the same kind is merged key-by-key** (index-by-index for lists),
    so unchanged entries and their comments keep their bytes.
 5. **Replacing a value that comes wholly from a YAML include always exits 3**, even if the new value is
-   identical; setting keys inside the include writes into the included file.
+   identical; setting existing keys inside the include writes into the included file (new keys: see 24).
+   This includes a mapping-form include: replacing the whole include, overrides and all, exits 3.
 6. **A `VALUE` that parses as a block collection (e.g. bare `a: b`) is a usage error (exit 2)**: it is
    not a single flow node. Quote it (`'"a: b"'`) to set the string.
 7. **Setting a collection to empty writes `{}` / `[]`**, since block style cannot represent an empty
@@ -62,3 +63,18 @@ corrupt user data or to contradict the contract.
     gets `change: "import"` (there is only ever one import, recorded as a unit). A legacy `set`/`remove`
     may have come from the CLI or a hand edit, which cannot be told apart, so its `via` and `change`
     are `null`.
+24. **"The file that contains the include reference" is one hop up.** A new key whose deepest existing
+    ancestor comes from `c.yml` is written in the file that includes `c.yml`, even if that file is itself
+    included. A mapping merged from a mapping-form include takes new keys in its overrides, where they
+    already are. A file whose whole content is another include (`file:b.yml`) is converted to
+    `$ref: file:b.yml` plus the new keys at the top level.
+25. **A scalar-form include in a flow collection is converted to a flow mapping**
+    (`{coder: {$ref: file:c.yml, t: 1}}`); one that is a block list item becomes `- $ref: file:c.yml`
+    with the overrides aligned below, keeping the end-of-line comment on the dash line. One whose
+    `file:` string is not on its key's (or dash's) line is refused (exit 3) rather than reflowed.
+26. **A `$ref` whose value is not a `file:` string is an error (exit 4)**, as is a mapping-form text
+    include with sibling keys. A mapping-form include with only `$ref` is exactly the include.
+27. **If the included YAML is not a mapping, overrides (a mapping) replace it**, following the merge rule
+    that anything but two mappings is replaced; with no overrides it is the included value unchanged.
+28. **Removing a key from a merged mapping (by setting the mapping) removes it everywhere it is set**:
+    from the include and from the overrides, so the merged value is what was asked for.

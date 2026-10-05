@@ -233,6 +233,14 @@ class Writer:
     # ------------------------------------------------------------------ adding entries
 
     def add_entries(self, item: Item, entries: list[tuple[str, Val]]) -> None:
+        site = override_site(item)
+        if site is not None:
+            item, keys = site
+            for k in reversed(keys):
+                entries = [(k, Val("map", dict(entries)))]
+            if item.ref is not None:
+                self._add_to_scalar_include(item, entries)
+                return
         doc, node = item.doc, item.node
         if node is None:
             self._append_to_empty_doc(doc, entries)
@@ -250,6 +258,39 @@ class Writer:
             head = " " * col + render_str(k, key_style, False) + ":"
             lines += entry_lines(head, v, col, doc.indent, val_style, seq=False)
         self._block_insert(doc, node, col, lines)
+
+    def _add_to_scalar_include(self, item: Item, entries: list[tuple[str, Val]]) -> None:
+        """Add overrides to a scalar-form include, converting it to mapping form."""
+        doc, node = item.ref
+        start, end = node.start_mark.index, node.end_mark.index
+        ref = "$ref: " + doc.text[start:end]
+        new = Val("map", dict(entries))
+        if item.flow:
+            self._edit(doc, start, end, "{" + ref + ", " + render_flow(new)[1:])
+            return
+        lines: list[str] = []
+        if node is doc.root:
+            col = 0
+            self._edit(doc, start, end, ref)
+        elif item.parent.kind == "map":
+            # "key: file:x  # c" -> "key:  # c", with the mapping below it
+            colon = _colon_end(doc, item.key_node, item.key)
+            if doc.line_of(start) != doc.line_of(colon):
+                raise WriteRefused(f"{doc.path}: cannot convert the include of {item.include} to mapping form")
+            col = item.key_node.start_mark.column + doc.indent
+            self._edit(doc, colon, end, "")
+            lines.append(" " * col + ref)
+        else:
+            # "- file:x  # c" -> "- $ref: file:x  # c", the rest aligned under it
+            dash = _dash_of(doc, node)
+            if doc.line_of(start) != doc.line_of(dash):
+                raise WriteRefused(f"{doc.path}: cannot convert the include of {item.include} to mapping form")
+            w = max(2, doc.indent)
+            col = doc.col(dash) + w
+            self._edit(doc, dash + 1, start, " " * (w - 1) + "$ref: ")
+        lines += block_lines(new, col, doc.indent)
+        pos = doc.line_end(doc.line_of(end))
+        self._edit(doc, pos, pos, "".join(doc.newline + ln for ln in lines))
 
     def append_items(self, item: Item, values: list[Val]) -> None:
         doc, node = item.doc, item.node
@@ -305,6 +346,13 @@ class Writer:
     # ------------------------------------------------------------------ removing entries
 
     def delete_keys(self, item: Item, keys: list[str]) -> None:
+        if item.parts is not None:
+            # A merged mapping: delete each key wherever it is set, in the include and in the overrides.
+            for part in item.parts:
+                here = [k for k in keys if k in part.value]
+                if here:
+                    self.delete_keys(part, here)
+            return
         node = item.node
         names = [k.value for k, _ in node.value]
         entries = [(k.start_mark.index, node_end(item.doc, v)) for k, v in node.value]
@@ -453,6 +501,27 @@ def _wrap(text: str, width: int) -> list[str]:
 # ---------------------------------------------------------------------- positions
 
 
+def override_site(item: Item) -> tuple[Item, list[str]] | None:
+    """Where new keys of mapping `item` go when it comes from an included file, and their key path there.
+
+    New keys go into the file that includes it, as overrides: under a merged mapping there, or into the
+    scalar-form include (returned with `ref` set). A mapping inside a list item, a mapping in the
+    configuration file itself and a merged mapping (whose overrides are already there) take them in place.
+    """
+    if item.parts is not None:
+        return None
+    x, keys = item, []
+    while x.ref is None:
+        parent = x.parent
+        if parent is None or parent.kind == "seq":
+            return None
+        keys.insert(0, x.key)
+        if parent.doc is not x.doc:
+            return parent, keys
+        x = parent
+    return x, keys
+
+
 def _empty_doc(doc: Doc) -> bool:
     return doc.root is None
 
@@ -489,15 +558,18 @@ def _dash_of(doc: Doc, item_node: yaml.Node) -> int:
 
 def anchor_of(item: Item) -> int:
     """Index just after the ':' of a mapping entry or the '-' of a block sequence item."""
-    doc = item.doc
     if item.parent.kind == "map":
-        i = item.key_node.end_mark.index
-        while i < len(doc.text) and doc.text[i] in " \t\r\n":
-            i += 1
-        if i >= len(doc.text) or doc.text[i] != ":":
-            raise PathNotFound(f"{doc.path}: cannot locate value of {item.key}")
-        return i + 1
-    return _dash_of(doc, item.node) + 1
+        return _colon_end(item.doc, item.key_node, item.key)
+    return _dash_of(item.doc, item.node) + 1
+
+
+def _colon_end(doc: Doc, key_node: yaml.Node, key: str) -> int:
+    i = key_node.end_mark.index
+    while i < len(doc.text) and doc.text[i] in " \t\r\n":
+        i += 1
+    if i >= len(doc.text) or doc.text[i] != ":":
+        raise PathNotFound(f"{doc.path}: cannot locate value of {key}")
+    return i + 1
 
 
 def _absorbs_comments(doc: Doc, end: int, cindent: int) -> bool:
