@@ -5,7 +5,7 @@ AI orchestration. This package currently provides the configuration subsystem:
 ```
 uv run troupe config get PATH [--theatre DIR]
 uv run troupe config show [PATH] [--sources] [--theatre DIR]
-uv run troupe config set PATH VALUE [--in-include] [--reason TEXT] [--theatre DIR]
+uv run troupe config set PATH VALUE [--in-include] [--expand-alias] [--reason TEXT] [--theatre DIR]
 uv run troupe config history [PATH] [--theatre DIR]
 uv run troupe config watch [--theatre DIR]
 ```
@@ -20,6 +20,11 @@ uv run troupe config watch [--theatre DIR]
   an included section is added as an override in the including file, which never touches the shared
   include. List items and keys inside list items stay in the file that holds the list.
   With `--in-include`, a new key is written into the included file instead.
+- Aliases: setting a value defined at an anchor (`&name`) changes it there, and so everywhere `*name` is
+  used. Setting a path reached through an alias, or through a merge key (`<<: *name`), exits 3; with
+  `--expand-alias`, that alias is replaced by a block-style copy of the anchored value (its key's line
+  ends `  # expanded from *name by troupe`) and the value is set in the copy. Merge keys are resolved
+  when reading and never written.
 - The configuration is held as an event-sourced projection (`eventsourcing`, SQLite at
   `.troupe/troupe-state.sqlite`); `history` lists per-leaf `import`/`set`/`remove` events.
 - Every command except `history` first reconciles the projection with the files (hand edits become

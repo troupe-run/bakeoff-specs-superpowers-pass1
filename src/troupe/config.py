@@ -27,6 +27,45 @@ class WriteRefused(Exception):
 
 _BREAK = re.compile(r"\r\n|\r|\n")
 
+MERGE = "<<"
+
+
+@dataclass(frozen=True)
+class Alias:
+    """An alias (`*name`) in a file: the anchor's name and the span of the `*name` token."""
+
+    name: str
+    start: int
+    end: int
+
+
+MERGE_INLINE = Alias(MERGE, -1, -1)  # `merged` of a value merged from a mapping written in place
+
+
+def is_merge(key: yaml.Node) -> bool:
+    return isinstance(key, yaml.ScalarNode) and key.value == MERGE and key.style is None
+
+
+class _Loader(yaml.SafeLoader):
+    """Composes like SafeLoader, and records where each alias is used.
+
+    An alias composes to the anchored node itself, so the node cannot tell its uses apart; `aliases` maps
+    (id of the collection, id of the key node or the item index) to the alias used there.
+    """
+
+    def __init__(self, stream: str):
+        super().__init__(stream)
+        self.aliases: dict[tuple[int, Any], Alias] = {}
+
+    def compose_node(self, parent, index):
+        if index is not None and self.check_event(yaml.AliasEvent):
+            event = self.peek_event()
+            node = super().compose_node(parent, index)
+            at = id(index) if isinstance(index, yaml.Node) else index
+            self.aliases[(id(parent), at)] = Alias(event.anchor, event.start_mark.index, event.end_mark.index)
+            return node
+        return super().compose_node(parent, index)
+
 
 class Doc:
     """A YAML file: its text, composed node tree, line index, and pending edits."""
@@ -34,10 +73,14 @@ class Doc:
     def __init__(self, path: Path, text: str):
         self.path = path
         self.text = text
+        loader = _Loader(text)
         try:
-            self.root: yaml.Node | None = yaml.compose(text, Loader=yaml.SafeLoader)
+            self.root: yaml.Node | None = loader.get_single_node()
         except yaml.YAMLError as exc:
             raise ConfigError(f"{path}: invalid YAML: {str(exc).splitlines()[0]}") from exc
+        finally:
+            loader.dispose()
+        self.aliases = loader.aliases
         self.line_starts = [0] + [m.end() for m in _BREAK.finditer(text)]
         self.newline = "\r\n" if "\r\n" in text else "\n"
         self.indent = _detect_indent(self.root)
@@ -75,6 +118,10 @@ class Doc:
         return idx - self.line_start(self.line_of(idx))
 
     # edits ------------------------------------------------------------------
+    def alias_at(self, parent: yaml.Node, at: yaml.Node | int) -> Alias | None:
+        """The alias used as the value of key node (or item index) `at` of collection `parent`, if any."""
+        return self.aliases.get((id(parent), id(at) if isinstance(at, yaml.Node) else at))
+
     def edit(self, start: int, end: int, new: str) -> None:
         if self.text[start:end] == new:
             return
@@ -92,9 +139,12 @@ class Doc:
 
 
 def _detect_indent(root: yaml.Node | None) -> int:
-    stack = [root]
+    stack, seen = [root], set()
     while stack:
         node = stack.pop()
+        if id(node) in seen:  # aliases share nodes, and may even be recursive
+            continue
+        seen.add(id(node))
         if isinstance(node, yaml.MappingNode):
             for k, v in node.value:
                 if (
@@ -132,6 +182,9 @@ class Item:
         `$ref` mapping (mapping form) that includes it.
     parts: for a mapping merged from an include and its overrides, the merged mappings (included part
         first); `doc`/`node` are then the overrides' mapping, where new keys go.
+    alias: the alias this value is used through, when it is written `*name` here.
+    merged: the alias of the mapping a merge key (`<<`) of the parent mapping takes this value from
+        (`MERGE_INLINE` if that mapping is written in place).
     """
 
     kind: str
@@ -145,6 +198,8 @@ class Item:
     flow: bool = False  # inside a flow collection
     ref: "tuple[Doc, yaml.Node] | None" = None
     parts: "list[Item] | None" = None
+    alias: Alias | None = None
+    merged: Alias | None = None
 
     @property
     def yaml_include(self) -> bool:
@@ -189,20 +244,34 @@ def load(theatre: Path, overrides: dict[Path, str] | None = None) -> Config:
             docs[p] = Doc(p, text_of(p))
         return docs[p]
 
-    def build(doc: Doc, node: yaml.Node | None, stack: tuple[Path, ...], flow: bool) -> Item:
+    def build(doc: Doc, node: yaml.Node | None, stack: tuple[Path, ...], flow: bool, nodes: tuple = ()) -> Item:
         if node is None:
             return Item("scalar", doc, None, None)
+        if isinstance(node, (yaml.MappingNode, yaml.SequenceNode)):
+            if any(n is node for n in nodes):
+                raise ConfigError(f"{doc.path}: recursive alias")
+            nodes = nodes + (node,)
         if isinstance(node, yaml.MappingNode):
             ref = None
             item = Item("map", doc, node, {}, flow=flow)
+            explicit = {k.value for k, _ in node.value if isinstance(k, yaml.ScalarNode) and not is_merge(k)}
             for k, v in node.value:
                 if not isinstance(k, yaml.ScalarNode):
                     raise ConfigError(f"{doc.path}: complex mapping keys are not supported")
                 if k.value == "$ref":
                     ref = v
                     continue
-                child = build(doc, v, stack, bool(node.flow_style))
+                if is_merge(k):
+                    # Merged keys sit where the merge key is; explicit keys win, then earlier mappings.
+                    for source, alias in merge_sources(doc, node, k, v, stack, nodes):
+                        for key, child in source.value.items():
+                            if key not in explicit and key not in item.value:
+                                child.parent, child.merged = item, alias or MERGE_INLINE
+                                item.value[key] = child
+                    continue
+                child = build(doc, v, stack, bool(node.flow_style), nodes)
                 child.parent, child.key, child.key_node = item, k.value, k
+                child.alias = doc.alias_at(node, k)
                 item.value[k.value] = child
             if ref is None:
                 return item
@@ -223,8 +292,9 @@ def load(theatre: Path, overrides: dict[Path, str] | None = None) -> Config:
         if isinstance(node, yaml.SequenceNode):
             item = Item("seq", doc, node, [], flow=flow)
             for i, v in enumerate(node.value):
-                child = build(doc, v, stack, bool(node.flow_style))
+                child = build(doc, v, stack, bool(node.flow_style), nodes)
                 child.parent, child.key = item, i
+                child.alias = doc.alias_at(node, i)
                 item.value.append(child)
             return item
         value = scalar_value(node)
@@ -234,6 +304,21 @@ def load(theatre: Path, overrides: dict[Path, str] | None = None) -> Config:
                 item.ref = (doc, node)
             return item
         return Item("scalar", doc, node, value, flow=flow)
+
+    def merge_sources(
+        doc: Doc, node: yaml.Node, k: yaml.Node, v: yaml.Node, stack: tuple[Path, ...], nodes: tuple
+    ) -> list[tuple[Item, Alias | None]]:
+        """The mappings merged by merge key `k` (value `v`): one mapping, or a list of them."""
+        if isinstance(v, yaml.SequenceNode):
+            sources = [(x, doc.alias_at(v, i)) for i, x in enumerate(v.value)]
+        else:
+            sources = [(v, doc.alias_at(node, k))]
+        out = []
+        for source, alias in sources:
+            if not isinstance(source, yaml.MappingNode):
+                raise ConfigError(f"{doc.path}: a merge key (<<) must merge mappings")
+            out.append((build(doc, source, stack, bool(node.flow_style), nodes), alias))
+        return out
 
     def include(doc: Doc, node: yaml.Node, value: str, stack: tuple[Path, ...], flow: bool) -> Item:
         target = (doc.path.parent / value[5:]).resolve()
@@ -263,6 +348,7 @@ def merge(base: Item, over: Item) -> Item:
         return over
     item = Item("map", over.doc, over.node, {}, flow=over.flow, parts=[base, over])
     item.parent, item.key, item.key_node = over.parent, over.key, over.key_node
+    item.alias, item.merged = over.alias, over.merged
     for k, child in base.value.items():
         if k in over.value:
             child = merge(child, over.value[k])

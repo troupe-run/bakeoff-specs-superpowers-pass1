@@ -27,7 +27,7 @@ from .config import (
 )
 from .dump import dump, source_namer
 from .store import STATE_FILE, ConfigStore, diff, lineage
-from .writer import Writer
+from .writer import Writer, expand, node_val, shared_on_path
 from .yamlcore import ValueError_, format_scalar, parse_value, same
 
 
@@ -70,6 +70,11 @@ def _parser() -> argparse.ArgumentParser:
                 "--in-include",
                 action="store_true",
                 help="write a new key into the included file instead of as an override in the including file",
+            )
+            p.add_argument(
+                "--expand-alias",
+                action="store_true",
+                help="replace the alias on PATH with its own copy of the anchored value, then set the copy",
             )
     return parser
 
@@ -150,7 +155,7 @@ def run(argv: list[str]) -> int:
             _reconcile(store, cfg)
             if args.cmd == "set":
                 how = lineage("cli", actor, args.reason)
-                return _set(theatre, cfg, store, segs, args.path, value, how, args.in_include)
+                return _set(theatre, cfg, store, segs, args.path, value, how, args.in_include, args.expand_alias)
 
     if args.cmd in ("get", "show"):
         item = lookup(cfg.root, segs, args.path) if segs is not None else cfg.root
@@ -198,11 +203,34 @@ def _reconcile(store: ConfigStore, cfg: Config) -> None:
 
 
 def _set(
-    theatre: Path, cfg, store: ConfigStore, segs: list[str], path: str, value, how: dict, in_include: bool = False
+    theatre: Path,
+    cfg,
+    store: ConfigStore,
+    segs: list[str],
+    path: str,
+    value,
+    how: dict,
+    in_include: bool = False,
+    expand_alias: bool = False,
 ) -> int:
-    writer = Writer(in_include)
-    writer.set_path(cfg.root, segs, value, path)
-    results = {p: t for p, t in writer.results().items() if p not in writer.docs or t != writer.docs[p].text}
+    planned: dict[Path, str] = {}
+    target = cfg
+    shared, depth = shared_on_path(cfg.root, segs) if expand_alias else (None, 0)
+    if shared is not None:
+        # Give the aliased use its own copy, then set the value in the copy.
+        expander = Writer()
+        expand(expander, shared, value if depth == len(segs) else node_val(shared.node))
+        planned = expander.results()
+        if depth < len(segs):
+            try:
+                target = load(theatre, overrides=planned)
+            except ConfigError as exc:
+                raise WriteRefused(f"{path}: cannot expand the alias faithfully ({exc})") from exc
+    if shared is None or depth < len(segs):
+        writer = Writer(in_include)
+        writer.set_path(target.root, segs, value, path)
+        planned.update(writer.results())
+    results = {p: t for p, t in planned.items() if p not in cfg.docs or t != cfg.docs[p].text}
     if not results:
         return 0
     # Check the planned write before touching any file.
@@ -211,7 +239,7 @@ def _set(
         written = lookup(new_cfg.root, segs, path)
     except (ConfigError, PathNotFound) as exc:
         raise WriteRefused(f"{path}: cannot write this change faithfully ({exc})") from exc
-    expected = writer.raw.get(written.include, value.value) if written.kind == "text" else value.py()
+    expected = results.get(written.include, value.value) if written.kind == "text" else value.py()
     if not same(written.py(), expected):
         raise WriteRefused(f"{path}: cannot write this change faithfully")
     for p, text in results.items():

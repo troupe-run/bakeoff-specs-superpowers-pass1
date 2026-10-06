@@ -82,3 +82,18 @@ corrupt user data or to contradict the contract.
     ancestor comes from; under a merged mapping, that is the included file (never the overrides, even if
     they already hold part of the path). Existing values still change where they are set, and without
     any include the flag changes nothing.
+30. **Aliases are found where they are written.** PyYAML composes an alias to the anchored node itself, so
+    the loader records the position of every `*name` and marks the values reached through one. A write
+    that would reach an aliased value anywhere (also by setting an enclosing mapping or list) exits 3,
+    even when the value would not change. Replacing an anchored value keeps its anchor and tag.
+31. **Merge keys are resolved when reading** (explicit keys win, then earlier merged mappings; merged keys
+    sit where the merge key is). A merged value is reached through its alias: setting it exits 3, and so
+    does any write that would remove it or touch `<<`. With `--expand-alias` it gets an explicit key
+    beside the merge key (`model: sonnet  # expanded from *b by troupe`), which overrides the merged one
+    without writing `<<`. A value merged from a mapping written in place (`<<: {..}`) is not expanded.
+32. **The expanded copy is the anchored value as read**: nested aliases and merge keys are resolved, and
+    an aliased include (`&f file:x.yml`) is copied as its content, so the copy shares nothing with the
+    anchor. Comments inside the anchored value are not copied. An alias inside a flow collection cannot
+    take a block-style copy: `--expand-alias` exits 3 there. Without an alias on the path,
+    `--expand-alias` changes nothing.
+33. **A recursive alias (`a: &a {b: *a}`) is a configuration error (exit 4).**

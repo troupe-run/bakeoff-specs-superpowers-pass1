@@ -12,9 +12,10 @@ from pathlib import Path
 
 import yaml
 
-from .config import Doc, Item, PathNotFound, WriteRefused
+from .config import MERGE, MERGE_INLINE, Doc, Item, PathNotFound, WriteRefused, is_merge
 from .yamlcore import (
     Val,
+    scalar_value,
     chomp_for,
     chomp_ok,
     literal_lines,
@@ -52,9 +53,12 @@ class Writer:
         item = root
         for i, seg in enumerate(segs):
             last = i == len(segs) - 1
+            if seg == MERGE:
+                raise WriteRefused(f"{path}: merge keys (<<) are never written")
             if item.kind == "map":
                 if seg in item.value:
                     item = item.value[seg]
+                    _check_shared(item, path, ".".join(segs[: i + 1]))
                     continue
                 rest = segs[i + 1 :]
                 if any(s.isdigit() for s in rest):
@@ -70,6 +74,7 @@ class Writer:
                 idx = int(seg)
                 if idx < len(item.value):
                     item = item.value[idx]
+                    _check_shared(item, path, ".".join(segs[: i + 1]))
                     continue
                 if idx == len(item.value) and last:
                     self.append_items(item, [value])
@@ -92,6 +97,7 @@ class Writer:
     def assign(self, item: Item, v: Val) -> None:
         if same(item.py(), v.py()):
             return
+        _check_shared(item, "", "")
         if item.yaml_include:
             raise WriteRefused(f"value comes from include {item.include}; refusing to replace it")
         if item.kind == "text":
@@ -101,6 +107,8 @@ class Writer:
             kept = [k for k in item.value if k in v.value]
             if kept or not item.value:
                 gone = [k for k in item.value if k not in v.value]
+                for k in gone:
+                    _check_shared(item.value[k], "", "")
                 if gone:
                     self.delete_keys(item, gone)
                 for k in kept:
@@ -135,16 +143,19 @@ class Writer:
         if node is None or item.parent is None:
             raise WriteRefused(f"{doc.path}: cannot replace the document root")
         style = style_name(node)
+        # An anchor or tag on the value stays, and so do the aliases of that anchor.
+        s, props_end = content_start(doc, node)
         if item.flow:
             text = render_flow(v, style if style in ("plain", "single", "double") else None)
-            self._replace_inline(doc, node.start_mark.index, node_end(doc, node), text, needs_space=False)
+            self._replace_inline(doc, s, node_end(doc, node), text, needs_space=props_end == s)
             return
 
         anchor = anchor_of(item)
         # column of the parent key, or of the item's dash
         pcol = item.key_node.start_mark.column if item.parent.kind == "map" else doc.col(anchor - 1)
+        if props_end is not None:
+            anchor = props_end  # the value follows its properties as it would follow the ':' or '-'
         indent = doc.indent
-        s = node.start_mark.index
         end = node_end(doc, node)
 
         # old regions: inline part (on the anchor line) and body (following lines)
@@ -400,6 +411,124 @@ class Writer:
             i = j + 1
 
 
+# ---------------------------------------------------------------------- aliases
+
+
+def _check_shared(item: Item, path: str, at: str) -> None:
+    """Refuse to write a value that is shared through an alias or comes from a merge key."""
+    where = f"{path}: {at}" if at and at != path else (path or "value")
+    if item.alias is not None:
+        name = item.alias.name
+        raise WriteRefused(
+            f"{where} is an alias (*{name}); writing it would change every use of &{name}."
+            f" Set it at the anchor, or use --expand-alias to give this use its own copy"
+        )
+    if item.merged is not None:
+        source = "a mapping" if item.merged is MERGE_INLINE else f"*{item.merged.name}"
+        raise WriteRefused(
+            f"{where} comes from a merge key (<<: {source}), and merge keys are never written."
+            f" Set it at the anchor, or use --expand-alias to give it its own key here"
+        )
+
+
+def shared_on_path(root: Item, segs: list[str]) -> tuple[Item | None, int]:
+    """The first value on the path reached through an alias or a merge key, and its depth (number of segments)."""
+    item = root
+    for i, seg in enumerate(segs):
+        if item.kind == "map" and seg in item.value:
+            item = item.value[seg]
+        elif item.kind == "seq" and seg.isdigit() and int(seg) < len(item.value):
+            item = item.value[int(seg)]
+        else:
+            break
+        if item.alias is not None or item.merged is not None:
+            return item, i + 1
+    return None, 0
+
+
+def node_val(node: yaml.Node) -> Val:
+    """A node's value as a `Val` (aliases followed, merge keys resolved), for writing a copy of it."""
+    if isinstance(node, yaml.MappingNode):
+        explicit = {k.value for k, _ in node.value if not is_merge(k)}
+        out: dict[str, Val] = {}
+        for k, v in node.value:
+            if not isinstance(k, yaml.ScalarNode):
+                raise WriteRefused("complex mapping keys are not supported")
+            if not is_merge(k):
+                out[k.value] = node_val(v)
+                continue
+            for source in v.value if isinstance(v, yaml.SequenceNode) else [v]:
+                for key, x in node_val(source).value.items():
+                    if key not in explicit and key not in out:
+                        out[key] = x
+        return Val("map", out)
+    if isinstance(node, yaml.SequenceNode):
+        return Val("seq", [node_val(v) for v in node.value])
+    value = scalar_value(node)
+    if isinstance(value, str):
+        return Val("str", value)
+    return Val("other", value, src=node.value if node.value != "" else "null")
+
+
+def expand(writer: Writer, item: Item, v: Val) -> None:
+    """Give `item`, used through an alias or merged by a merge key, its own copy `v` in its file.
+
+    An alias is replaced by `v`; a merged value gets an explicit key beside the merge key. The key's line
+    says where the copy came from.
+    """
+    shared = item.alias or item.merged
+    if shared is MERGE_INLINE:
+        raise WriteRefused(f"{item.key}: comes from a mapping merged in place (<<); set it there")
+    if item.flow or item.parent.node is None or item.parent.node.flow_style:
+        raise WriteRefused(f"{item.key}: cannot expand *{shared.name} in a flow collection into block style")
+    doc, parent = item.parent.doc, item.parent
+    comment = f"  # expanded from *{shared.name} by troupe"
+    indent = doc.indent
+    block = v.is_collection and v.value
+    if v.multiline and not block:
+        inline = render_double(v.value)
+    elif v.is_collection and not block:
+        inline = "{}" if v.kind == "map" else "[]"
+    else:
+        inline = render_inline_scalar(v, None, False) if not block else ""
+
+    if item.merged is not None:
+        pairs = parent.node.value
+        col = pairs[0][0].start_mark.column
+        key_style = style_name(pairs[-1][0])
+        head = " " * col + render_str(item.key, key_style, False) + ":"
+        if block:
+            lines = [head + comment] + block_lines(v, col + indent, indent)
+        else:
+            lines = [head + " " + inline + comment]
+        writer._block_insert(doc, parent.node, col, lines)
+        writer.docs[doc.path] = doc
+        return
+
+    alias = item.alias
+    if parent.kind == "map":
+        head_end = _colon_end(doc, item.key_node, item.key)
+        col = item.key_node.start_mark.column + indent
+    else:
+        head_end = _dash_before(doc, alias.start) + 1
+        col = doc.col(head_end - 1) + max(2, indent)
+    if not block:
+        writer._edit(doc, alias.start, alias.end, inline + comment)
+        return
+    writer._edit(doc, head_end, alias.end, comment)
+    pos = doc.line_end(doc.line_of(alias.end))
+    writer._edit(doc, pos, pos, "".join(doc.newline + ln for ln in block_lines(v, col, indent)))
+
+
+def _dash_before(doc: Doc, idx: int) -> int:
+    i = idx - 1
+    while i >= 0 and doc.text[i] in " \t\r\n":
+        i -= 1
+    if i < 0 or doc.text[i] != "-":
+        raise PathNotFound(f"{doc.path}: cannot locate list item")
+    return i
+
+
 # ---------------------------------------------------------------------- rendering new block content
 
 
@@ -532,10 +661,30 @@ def _empty_doc(doc: Doc) -> bool:
     return doc.root is None
 
 
+def content_start(doc: Doc, node: yaml.Node) -> tuple[int, int | None]:
+    """Where a node's content starts, after its properties (anchor, tag), and where those end (None: none)."""
+    text, i = doc.text, node.start_mark.index
+    props_end = None
+    while i < len(text) and text[i] in "&!":
+        while i < len(text) and text[i] not in " \t\r\n":
+            i += 1
+        props_end = i
+        while i < len(text):
+            if text[i] in " \t\r\n":
+                i += 1
+            elif text[i] == "#":
+                i = doc.line_end(doc.line_of(i))
+            else:
+                break
+    if props_end is not None and isinstance(node, yaml.ScalarNode) and i > node.end_mark.index:
+        i = props_end  # an empty scalar
+    return i, props_end
+
+
 def node_end(doc: Doc, node: yaml.Node) -> int:
     """End index of a node's content (block scalars: last content line, without its line break)."""
     if isinstance(node, yaml.ScalarNode):
-        s, e = node.start_mark.index, node.end_mark.index
+        s, e = content_start(doc, node)[0], node.end_mark.index
         if node.style in ("|", ">"):
             hm = _HEADER.match(doc.text, s)
             if "+" in hm.group(0):
