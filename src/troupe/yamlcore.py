@@ -82,11 +82,16 @@ def format_scalar(value: Any) -> str:
 
 @dataclass
 class Val:
-    """A value given on the command line. `kind` is map, seq, str or other (non-string scalar)."""
+    """A value given on the command line. `kind` is map, seq, str or other (non-string scalar).
+
+    A string can be written with a `tag` (`!literal`), or be meant as an include (`include`).
+    """
 
     kind: str
     value: Any = None  # dict[str, Val] | list[Val] | str | scalar
     src: str = ""  # source text of a non-string scalar
+    tag: str | None = None
+    include: bool = False
 
     def py(self) -> Any:
         if self.kind == "map":
@@ -101,7 +106,7 @@ class Val:
 
     @property
     def multiline(self) -> bool:
-        return self.kind == "str" and "\n" in self.value
+        return self.kind == "str" and "\n" in self.value and self.tag is None  # a tagged string stays inline
 
 
 class ValueError_(Exception):
@@ -232,9 +237,8 @@ def render_str(s: str, style: str | None, flow: bool) -> str:
 
 def render_inline_scalar(v: Val, style: str | None, flow: bool) -> str:
     if v.kind == "str":
-        if "\n" in v.value:
-            return render_double(v.value)
-        return render_str(v.value, style, flow)
+        text = render_double(v.value) if "\n" in v.value else render_str(v.value, style, flow)
+        return f"{v.tag} {text}" if v.tag else text
     return v.src
 
 

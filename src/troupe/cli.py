@@ -13,22 +13,27 @@ import threading
 from contextlib import contextmanager
 from pathlib import Path
 
+from . import schema as schemas
 from .config import (
+    LITERAL,
     Config,
     ConfigError,
+    FetchError,
     Item,
     PathNotFound,
     WriteRefused,
     find_config,
     flatten,
+    include_like,
+    is_remote,
     load,
     lookup,
     split_path,
 )
 from .dump import dump, source_namer
 from .store import STATE_FILE, ConfigStore, diff, lineage
-from .writer import Writer, expand, node_val, shared_on_path
-from .yamlcore import ValueError_, format_scalar, parse_value, same
+from .writer import Writer, expand, matches, node_val, shared_on_path
+from .yamlcore import Val, ValueError_, format_scalar, parse_value, same
 
 
 class UsageError(Exception):
@@ -75,6 +80,11 @@ def _parser() -> argparse.ArgumentParser:
                 "--expand-alias",
                 action="store_true",
                 help="replace the alias on PATH with its own copy of the anchored value, then set the copy",
+            )
+            p.add_argument(
+                "--include",
+                action="store_true",
+                help="write a string that reads as an include (file:..., https://...) as an include, not a literal",
             )
     return parser
 
@@ -155,7 +165,9 @@ def run(argv: list[str]) -> int:
             _reconcile(store, cfg)
             if args.cmd == "set":
                 how = lineage("cli", actor, args.reason)
-                return _set(theatre, cfg, store, segs, args.path, value, how, args.in_include, args.expand_alias)
+                return _set(
+                    theatre, cfg, store, segs, args.path, value, how, args.in_include, args.expand_alias, args.include
+                )
 
     if args.cmd in ("get", "show"):
         item = lookup(cfg.root, segs, args.path) if segs is not None else cfg.root
@@ -212,7 +224,9 @@ def _set(
     how: dict,
     in_include: bool = False,
     expand_alias: bool = False,
+    include: bool = False,
 ) -> int:
+    _mark_includes(value, _schema_at(cfg, segs), include, path)
     planned: dict[Path, str] = {}
     target = cfg
     shared, depth = shared_on_path(cfg.root, segs) if expand_alias else (None, 0)
@@ -223,7 +237,9 @@ def _set(
         planned = expander.results()
         if depth < len(segs):
             try:
-                target = load(theatre, overrides=planned)
+                target = load(theatre, overrides=planned, fetched=cfg.fetched)
+            except FetchError:
+                raise
             except ConfigError as exc:
                 raise WriteRefused(f"{path}: cannot expand the alias faithfully ({exc})") from exc
     if shared is None or depth < len(segs):
@@ -235,12 +251,18 @@ def _set(
         return 0
     # Check the planned write before touching any file.
     try:
-        new_cfg = load(theatre, overrides=results)
+        new_cfg = load(theatre, overrides=results, fetched=cfg.fetched)
         written = lookup(new_cfg.root, segs, path)
+    except FetchError:
+        raise  # a new remote include that cannot be fetched
     except (ConfigError, PathNotFound) as exc:
         raise WriteRefused(f"{path}: cannot write this change faithfully ({exc})") from exc
-    expected = results.get(written.include, value.value) if written.kind == "text" else value.py()
-    if not same(written.py(), expected):
+    if _has_include(value):
+        faithful = matches(written, value)
+    else:
+        expected = results.get(written.include, value.value) if written.kind == "text" else value.py()
+        faithful = same(written.py(), expected)
+    if not faithful:
         raise WriteRefused(f"{path}: cannot write this change faithfully")
     for p, text in results.items():
         p.write_bytes(text.encode("utf-8"))
@@ -249,19 +271,65 @@ def _set(
     return 0
 
 
+def _schema_at(cfg: Config, segs: list[str]):
+    """The schema of PATH, following the configuration where it exists (a digit is an index only in a list)."""
+    schema, item = cfg.schema, cfg.root
+    for seg in segs:
+        if item is not None and item.kind == "seq" and seg.isdigit():
+            i = int(seg)
+            schema = schemas.item_schema(schema, i)
+            item = item.value[i] if i < len(item.value) else None
+        else:
+            schema = schemas.prop_schema(schema, seg)
+            item = item.value.get(seg) if item is not None and item.kind == "map" else None
+    return schema
+
+
+def _mark_includes(v: Val, schema, include: bool, path: str) -> None:
+    """Decide how each string of VALUE that reads as an include is written.
+
+    Where the schema says `format: uri` it is a literal anyway; elsewhere it is tagged `!literal`, or with
+    `--include` meant as an include.
+    """
+    if v.kind == "map":
+        for k, x in v.value.items():
+            _mark_includes(x, schemas.prop_schema(schema, k), include, path)
+    elif v.kind == "seq":
+        for i, x in enumerate(v.value):
+            _mark_includes(x, schemas.item_schema(schema, i), include, path)
+    elif v.kind == "str" and include_like(v.value):
+        if schemas.is_uri(schema):
+            if include:
+                raise WriteRefused(f"{path}: the schema says {v.value!r} is a URI (format: uri), not an include")
+        elif include:
+            v.include = True
+        else:
+            v.tag = LITERAL
+
+
+def _has_include(v: Val) -> bool:
+    if v.kind == "map":
+        return any(_has_include(x) for x in v.value.values())
+    if v.kind == "seq":
+        return any(_has_include(x) for x in v.value)
+    return v.include
+
+
 # ---------------------------------------------------------------------------- watch
 
 POLL_SECONDS = 0.1
 
 
 def _loaded_texts(cfg: Config) -> dict[Path, str | None]:
-    """The contents `load` read, by file: the config file, its includes, and the absent other config name."""
-    texts: dict[Path, str | None] = {p: doc.text for p, doc in cfg.docs.items()}
+    """The contents `load` read, by local file: the config file, its includes, the schema, and the absent
+    other config name. Remote includes are not watched."""
+    texts: dict[Path, str | None] = {p: doc.text for p, doc in cfg.docs.items() if not is_remote(p)}
     for name in ("troupe.yml", "troupe.yaml"):
         texts.setdefault(cfg.config_path.parent / name, None)
+    texts[cfg.config_path.parent / schemas.SCHEMA_FILE] = cfg.schema_text
 
     def walk(item: Item) -> None:
-        if item.kind == "text":
+        if item.kind == "text" and not is_remote(item.include):
             texts[item.include] = item.value
         elif item.kind == "map":
             for child in item.value.values():

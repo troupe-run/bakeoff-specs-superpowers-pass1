@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from typing import Any, Callable
 
-from .config import Item
+from .config import LITERAL, Item, include_like, is_remote
 from .yamlcore import chomp_for, literal_lines, literal_ok, render_double, render_str
 
 INDENT = 2
@@ -33,7 +33,17 @@ def yaml_scalar(value: Any) -> str:
 
 
 def _scalar(item: Item, indent: int) -> tuple[str, list[str]]:
-    """The inline text of a scalar, and the content lines of a literal block (if it is written as one)."""
+    """The inline text of a scalar, and the content lines of a literal block (if it is written as one).
+
+    A string that would be read back as an include is tagged `!literal`, unless the schema marks it a URI.
+    """
+    text, block = _untagged(item, indent)
+    if include_like(item.value) and not item.uri:
+        text = f"{LITERAL} {text}"
+    return text, block
+
+
+def _untagged(item: Item, indent: int) -> tuple[str, list[str]]:
     value = item.value
     if not isinstance(value, str):
         return yaml_scalar(value), []
@@ -97,6 +107,8 @@ def source_namer(theatre: Path) -> Callable[[Item], str]:
 
     def name(item: Item) -> str:
         path = item.include if item.kind == "text" else item.doc.path
+        if is_remote(path):
+            return path
         return Path(os.path.relpath(path, base)).as_posix()
 
     return name

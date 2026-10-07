@@ -12,7 +12,7 @@ from pathlib import Path
 
 import yaml
 
-from .config import MERGE, MERGE_INLINE, Doc, Item, PathNotFound, WriteRefused, is_merge
+from .config import LITERAL, MERGE, MERGE_INLINE, Doc, Item, Origin, PathNotFound, WriteRefused, is_merge
 from .yamlcore import (
     Val,
     scalar_value,
@@ -37,8 +37,11 @@ class Writer:
         self.in_include = in_include  # new keys go into the included file, not into overrides
         self.docs: dict[Path, Doc] = {}
         self.raw: dict[Path, str] = {}  # whole-file writes (text includes)
+        self.path = ""  # the PATH being set, for messages
 
     def _edit(self, doc: Doc, start: int, end: int, new: str) -> None:
+        if doc.remote:
+            _refuse_remote(self.path, doc.path, doc.origins)
         self.docs[doc.path] = doc
         doc.edit(start, end, new)
 
@@ -50,6 +53,7 @@ class Writer:
     # ------------------------------------------------------------------ entry points
 
     def set_path(self, root: Item, segs: list[str], value: Val, path: str) -> None:
+        self.path = path
         item = root
         for i, seg in enumerate(segs):
             last = i == len(segs) - 1
@@ -91,15 +95,15 @@ class Writer:
                 return
             raise PathNotFound(f"path not found: {path} ({'.'.join(segs[:i])} is not a mapping or list)")
         if item.yaml_include:
-            raise WriteRefused(f"{path}: value comes from include {item.include}; refusing to replace it")
+            _refuse_include(item, path)
         self.assign(item, value)
 
     def assign(self, item: Item, v: Val) -> None:
-        if same(item.py(), v.py()):
+        if matches(item, v):
             return
         _check_shared(item, "", "")
         if item.yaml_include:
-            raise WriteRefused(f"value comes from include {item.include}; refusing to replace it")
+            _refuse_include(item, "")
         if item.kind == "text":
             self.write_text_include(item, v)
             return
@@ -129,6 +133,8 @@ class Writer:
         self.replace(item, v)
 
     def write_text_include(self, item: Item, v: Val) -> None:
+        if isinstance(item.include, str):
+            _refuse_remote(self.path, item.include, item.doc.origins_of(item.node))
         if v.kind != "str":
             raise WriteRefused(f"{item.include}: a text include can only be set to a string")
         content = v.value
@@ -145,6 +151,10 @@ class Writer:
         style = style_name(node)
         # An anchor or tag on the value stays, and so do the aliases of that anchor.
         s, props_end = content_start(doc, node)
+        if node.tag == LITERAL and v.tag == LITERAL:
+            v = Val(v.kind, v.value, v.src)  # already tagged
+        elif node.tag == LITERAL and v.include:
+            self._drop_literal_tag(doc, node, s)
         if item.flow:
             text = render_flow(v, style if style in ("plain", "single", "double") else None)
             self._replace_inline(doc, s, node_end(doc, node), text, needs_space=props_end == s)
@@ -188,7 +198,7 @@ class Writer:
                 new_inline = " " * (w - 1) + doc.newline.join([sub[0][pcol + w :], *sub[1:]])
             else:
                 body = block_lines(v, pcol + indent, indent)
-        elif v.kind == "str" and style in ("literal", "folded") and literal_ok(v.value):
+        elif v.kind == "str" and v.tag is None and style in ("literal", "folded") and literal_ok(v.value):
             hm = _HEADER.match(doc.text, s)
             chomp = hm.group(2) or hm.group(4)
             want, k = chomp_for(v.value)
@@ -225,6 +235,15 @@ class Writer:
         self._replace_inline(doc, is_, ie, new_inline, needs_space, anchor)
         if body or bs != be:
             self._edit(doc, bs, be, "".join(doc.newline + ln for ln in body))
+
+    def _drop_literal_tag(self, doc: Doc, node: yaml.Node, content: int) -> None:
+        """Remove the `!literal` tag of `node`, so that its new value is read as an include."""
+        m = re.compile(r"(?<![^ \t&!\r\n])" + re.escape(LITERAL) + r"(?=[ \t\r\n])[ \t]*").search(
+            doc.text, node.start_mark.index, content
+        )
+        if m is None:
+            raise WriteRefused(f"{doc.path}: cannot remove the {LITERAL} tag of {self.path}")
+        self._edit(doc, m.start(), m.end(), "")
 
     def _replace_inline(
         self, doc: Doc, is_: int, ie: int, new: str, needs_space: bool, anchor: int | None = None
@@ -411,6 +430,43 @@ class Writer:
             i = j + 1
 
 
+# ---------------------------------------------------------------------- includes
+
+
+def _refuse_remote(path: str, url: str, origins: list[Origin]) -> None:
+    where = "; ".join(str(o) for o in origins) or "(unknown)"
+    raise WriteRefused(
+        f"{path or 'value'} comes from remote include {url}, which troupe never changes."
+        f" Change the include in the local file instead: {where}"
+    )
+
+
+def _refuse_include(item: Item, path: str) -> None:
+    """Refuse to replace a value that comes wholly from a YAML include."""
+    if item.doc.remote:
+        _refuse_remote(path, item.include, item.doc.origins)
+    raise WriteRefused(f"{path or 'value'}: value comes from include {item.include}; refusing to replace it")
+
+
+def matches(item: Item, v: Val) -> bool:
+    """Whether `item` is what `v` asks for; a string meant as an include must be read as that include."""
+    if v.include:
+        return item.via == v.value
+    if v.kind == "map":
+        return (
+            item.kind == "map"
+            and item.value.keys() == v.value.keys()
+            and all(matches(item.value[k], x) for k, x in v.value.items())
+        )
+    if v.kind == "seq":
+        return (
+            item.kind == "seq"
+            and len(item.value) == len(v.value)
+            and all(matches(c, x) for c, x in zip(item.value, v.value))
+        )
+    return same(item.py(), v.py())
+
+
 # ---------------------------------------------------------------------- aliases
 
 
@@ -466,7 +522,7 @@ def node_val(node: yaml.Node) -> Val:
         return Val("seq", [node_val(v) for v in node.value])
     value = scalar_value(node)
     if isinstance(value, str):
-        return Val("str", value)
+        return Val("str", value, tag=LITERAL if node.tag == LITERAL else None)
     return Val("other", value, src=node.value if node.value != "" else "null")
 
 

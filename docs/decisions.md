@@ -97,3 +97,33 @@ corrupt user data or to contradict the contract.
     take a block-style copy: `--expand-alias` exits 3 there. Without an alias on the path,
     `--expand-alias` changes nothing.
 33. **A recursive alias (`a: &a {b: *a}`) is a configuration error (exit 4).**
+34. **Remote includes are fetched with `urllib`, once per command** (the `set` verification re-reads what
+    the command loaded), with a 30 s timeout. HTTP errors, unreachable hosts and non-UTF-8 bodies are
+    failed fetches (exit 4), also when the include is new in a `set --include`. `watch` does not poll
+    remote includes; it rereads them whenever a local file changes.
+35. **A `file:` include inside a remote file is resolved against its URL**, so it is remote too; a remote
+    file can never name a local file.
+36. **"The include string exactly as written" is its source text** (quotes included, anchor/tag left out),
+    with the local file and line: `troupe.yml:2: 'https://…/c.yml'`. For a remote include reached through
+    another remote include, that is the local include of the outer one (every such line, if several).
+    The remote file's own URL is named too.
+37. **Setting a remote value to the value it already has changes nothing and exits 0**, as for any other
+    unchanged value; replacing a whole remote include still exits 3 (see 5). `--in-include` and
+    `--expand-alias` cannot write into a remote file either (exit 3).
+38. **Schema validation uses `jsonschema` (Draft 2020-12)**; `format` is an annotation, not checked. An
+    unreadable, non-JSON or invalid schema is a configuration error (exit 4). The configuration is
+    validated as loaded: includes resolved, merge keys applied.
+39. **The schema decides `format: uri` only through `properties`, `items` and `additionalProperties`**, as
+    the contract says: `$ref`, `allOf`, `patternProperties` and the like are not followed. A key matched by
+    `patternProperties` does not take `additionalProperties`, and `items` applies after `prefixItems`.
+    A value merged from an include or a merge key takes the schema of where it appears.
+40. **`!literal` only stops a string being an include**; the value is read as it would be without the tag
+    (`!literal 3` is still 3). On a mapping or list it means nothing.
+41. **`set` treats every include-like string in VALUE alike**, also inside a flow collection
+    (`[file:x, y]` → `- !literal file:x`). A tagged string is written on one line (double-quoted if
+    multi-line). Replacing a `!literal` value keeps the tag (one is not added twice); with `--include` the
+    tag is removed. `--include` where the schema says `format: uri` exits 3, and with no include-like
+    string it changes nothing. With `--include` the write is verified by reading each such string back
+    as an include of exactly that string.
+42. **`show` tags strings that would be read as includes `!literal`** (unless the schema marks them URIs),
+    so its output still reads back as the same configuration.
